@@ -18,6 +18,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Restore release line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf true
+          git reset --hard
+
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -28,12 +34,12 @@ jobs:
 
       - name: Install Android NDK
         shell: pwsh
-        run: sdkmanager --install "ndk;27.2.12479018"
+        run: sdkmanager --install "ndk;25.2.9519653"
 
       - name: Build native libraries
         shell: pwsh
         run: |
-          $ndk = "$env:ANDROID_HOME\ndk\27.2.12479018"
+          $ndk = "$env:ANDROID_HOME\ndk\25.2.9519653"
           zig build -Dplatform=all -Drelease -Dandroid-ndk="$ndk"
 
       - name: Generate SHA-256 checksums
