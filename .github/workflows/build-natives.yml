@@ -1,0 +1,58 @@
+name: Build native binaries
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build all supported targets
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: pwsh
+        run: sdkmanager --install "ndk;27.2.12479018"
+
+      - name: Build native libraries
+        shell: pwsh
+        run: |
+          $ndk = "$env:ANDROID_HOME\ndk\27.2.12479018"
+          zig build -Dplatform=all -Drelease -Dandroid-ndk="$ndk"
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $root = (Resolve-Path zig-out).Path
+          $lines = Get-ChildItem -LiteralPath $root -Recurse -File |
+            Sort-Object FullName |
+            ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              $relative = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
+              "$hash  $relative"
+            }
+          $lines | Set-Content -LiteralPath zig-out/SHA256SUMS -Encoding ascii
+
+      - name: Upload native libraries and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: ysm-core-${{ github.sha }}
+          path: zig-out/
+          if-no-files-found: error
+          retention-days: 90
