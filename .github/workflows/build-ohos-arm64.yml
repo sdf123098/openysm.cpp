@@ -5,13 +5,17 @@ on:
   pull_request:
     paths:
       - 'dllmain.cpp'
+      - 'build.zig'
       - 'third_party/**'
+      - 'README.md'
       - '.github/workflows/build-ohos-arm64.yml'
   push:
     branches: [master]
     paths:
       - 'dllmain.cpp'
+      - 'build.zig'
       - 'third_party/**'
+      - 'README.md'
       - '.github/workflows/build-ohos-arm64.yml'
 
 permissions:
@@ -23,38 +27,62 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@8d6198c65fb0feaa111df26e6b467fea8345e46f # v2.0.5
+        with:
+          version: 0.16.0
 
       - name: Install OpenHarmony Native SDK
         id: ohos
-        uses: openharmony-rs/setup-ohos-sdk@v1.0.1
+        uses: openharmony-rs/setup-ohos-sdk@b312caf8a43bb836aa24c08f65f97e1f09a89cad # v1.0.1
         with:
           version: '6.0'
           components: native
           cache: 'true'
 
-      - name: Cross-compile using OpenHarmony Clang
+      - name: Cross-compile via build.zig OHOS target
         shell: bash
         env:
           OHOS_NATIVE_SDK: ${{ steps.ohos.outputs.ohos_sdk_native }}
         run: |
           set -euo pipefail
           test -d "$OHOS_NATIVE_SDK/sysroot"
-          CXX="$OHOS_NATIVE_SDK/llvm/bin/clang++"
-          test -x "$CXX"
-          "$CXX" --version
-          mkdir -p zig-out/ohos-arm64
-          "$CXX" \
-            --target=aarch64-linux-ohos \
-            --sysroot="$OHOS_NATIVE_SDK/sysroot" \
-            -D__MUSL__ \
-            -std=c++17 -O3 -shared -fPIC \
-            -fvisibility=hidden -fno-exceptions -fno-rtti \
-            -ffp-contract=fast -fno-math-errno -fno-trapping-math \
-            -Wl,--no-undefined -Wl,-z,noexecstack \
-            -Ithird_party/jni -Ithird_party/sse2neon \
-            dllmain.cpp \
-            -o zig-out/ohos-arm64/libysm-core.so
+          test -x "$OHOS_NATIVE_SDK/llvm/bin/clang++"
+          zig build -Dplatform=ohos-arm64 -Drelease -Dohos-sdk-native="$OHOS_NATIVE_SDK"
+
+      - name: Static JNI ABI regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          src = Path("dllmain.cpp").read_text(encoding="utf-8")
+          assert "static constexpr jint YSM_NATIVE_ABI_VERSION = 3;" in src, "ABI version must remain 3"
+          expected = {
+              "nGetAbiVersion": "()I",
+              "nInitModelCache": "(Ljava/nio/ByteBuffer;)J",
+              "nDestroyModelCache": "(J)V",
+              "nComputeModelVertices": "(JLjava/lang/Object;[F[FIIIFFFF)V",
+              "nBuildGpuMesh": "(Ljava/nio/ByteBuffer;[I)J",
+              "nGetGpuMeshVertexBuffer": "(J)Ljava/nio/ByteBuffer;",
+              "nGetGpuMeshIndexBuffer": "(J)Ljava/nio/ByteBuffer;",
+              "nReleaseGpuMeshScratch": "(J)V",
+              "nFreeGpuMesh": "(J)V",
+              "nComputeBoneMatrices": "(J[F[F[FILjava/nio/ByteBuffer;)V",
+              "nComputeBoneMatricesLocal": "(J[FILjava/nio/ByteBuffer;)V",
+          }
+          found = dict(re.findall(r'\(char \*\) "([^"]+)", \(char \*\) "([^"]+)"', src))
+          assert found == expected, f"JNI table mismatch: {found}"
+          for marker in (
+              "static_assert(sizeof(GpuVertex) == 32",
+              "static_assert(sizeof(BoneDataOut) == 144",
+              "static_assert(offsetof(BoneDataOut, packedLight) == 128",
+          ):
+              assert marker in src, f"Missing ABI guard: {marker}"
+          PY
 
       - name: Verify ELF architecture, JNI exports, and dependencies
         shell: bash
@@ -67,15 +95,62 @@ jobs:
           readelf -h "$LIB" | grep -q 'AArch64'
           readelf -d "$LIB" | tee zig-out/ohos-arm64/ELF_DYNAMIC.txt
           readelf -Ws "$LIB" | tee zig-out/ohos-arm64/ELF_SYMBOLS.txt > /dev/null
-          grep -q 'Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nGetAbiVersion' zig-out/ohos-arm64/ELF_SYMBOLS.txt
-          grep -q 'Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nInitModelCache' zig-out/ohos-arm64/ELF_SYMBOLS.txt
+          for sym in \
+            Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nGetAbiVersion \
+            Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nInitModelCache \
+            Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nComputeBoneMatrices \
+            Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nComputeBoneMatricesLocal \
+            JNI_OnLoad
+          do
+            grep -q "$sym" zig-out/ohos-arm64/ELF_SYMBOLS.txt
+          done
+          readelf -d "$LIB" | awk '/NEEDED/{gsub(/\[|\]/,"",$5); print $5}' | sort -u > zig-out/ohos-arm64/DT_NEEDED.txt
+          cat zig-out/ohos-arm64/DT_NEEDED.txt
+          ALLOWED="libc.so libc++_shared.so"
+          while IFS= read -r needed; do
+            [[ " $ALLOWED " == *" $needed "* ]] || { echo "Unexpected DT_NEEDED: $needed"; exit 1; }
+          done < zig-out/ohos-arm64/DT_NEEDED.txt
           (
             cd zig-out
             sha256sum ohos-arm64/libysm-core.so > SHA256SUMS
           )
 
+      - name: Capture SDK provenance
+        shell: bash
+        env:
+          OHOS_NATIVE_SDK: ${{ steps.ohos.outputs.ohos_sdk_native }}
+        run: |
+          set -euo pipefail
+          CXX="$OHOS_NATIVE_SDK/llvm/bin/clang++"
+          "$CXX" --version | tee zig-out/ohos-arm64/TOOLCHAIN_VERSION.txt
+          {
+            echo "ohos_sdk_native=$OHOS_NATIVE_SDK"
+            echo "setup_ohos_sdk_action_sha=b312caf8a43bb836aa24c08f65f97e1f09a89cad"
+            echo "requested_ohos_sdk_version=6.0"
+            echo "target=aarch64-linux-ohos"
+            echo "output=zig-out/ohos-arm64/libysm-core.so"
+          } | tee zig-out/ohos-arm64/SDK_PROVENANCE.txt
+          {
+            sha256sum "$CXX"
+            find "$OHOS_NATIVE_SDK/sysroot" -type f \( -name 'libc.so' -o -name 'libc++_shared.so' \) -print0 | sort -z | xargs -0 sha256sum
+          } > zig-out/ohos-arm64/SDK_SHA256SUMS.txt
+
+      - name: JNI runtime smoke status (OHOS JVM/device)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${OHOS_JVM_SMOKE_CMD:-}" ]]; then
+            eval "$OHOS_JVM_SMOKE_CMD" | tee zig-out/ohos-arm64/JNI_RUNTIME_SMOKE.txt
+          else
+            cat > zig-out/ohos-arm64/JNI_RUNTIME_SMOKE_BLOCKED.txt <<'EOF'
+          BLOCKED: HarmonyOS NEXT JVM/device JNI runtime validation was not executed in GitHub-hosted CI.
+          This workflow verifies cross-compilation and binary ABI surface only.
+          JNI load behavior must be validated separately on an OHOS-compatible Java runtime/device.
+          EOF
+          fi
+
       - name: Upload experimental OHOS build and diagnostics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ysm-core-ohos-arm64-${{ github.sha }}
           path: |

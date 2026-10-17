@@ -5,6 +5,7 @@ const PlatformSpec = struct {
     arch_os_abi: []const u8,
     extra_flags: []const []const u8 = &.{},
     needs_ndk: bool = false,
+    needs_ohos_sdk: bool = false,
 };
 
 const platforms = [_]PlatformSpec{
@@ -39,6 +40,12 @@ const platforms = [_]PlatformSpec{
         .extra_flags = &.{},
         .needs_ndk = true,
     },
+    .{
+        .name = "ohos-arm64",
+        .arch_os_abi = "aarch64-linux-ohos",
+        .extra_flags = &.{},
+        .needs_ohos_sdk = true,
+    },
 };
 
 pub fn build(b: *std.Build) void {
@@ -47,7 +54,7 @@ pub fn build(b: *std.Build) void {
     const platform_filter = b.option(
         []const u8,
         "platform",
-        "Target platform: windows-x64, windows-x86, linux-x64, macos-x64, macos-arm64, android-arm64, or all",
+        "Target platform: windows-x64, windows-x86, linux-x64, macos-x64, macos-arm64, android-arm64, ohos-arm64, or all",
     ) orelse "all";
 
     const ndk_root: ?[]const u8 = b.option(
@@ -62,6 +69,12 @@ pub fn build(b: *std.Build) void {
         "android-api",
         "Android API level (default 21).",
     ) orelse 21;
+
+    const ohos_sdk_native: ?[]const u8 = b.option(
+        []const u8,
+        "ohos-sdk-native",
+        "Path to OpenHarmony Native SDK root (overrides $OHOS_NATIVE_SDK). Required for ohos-arm64.",
+    ) orelse b.graph.environ_map.get("OHOS_NATIVE_SDK");
 
     const base_flags = [_][]const u8{
         "-std=c++17",
@@ -88,6 +101,23 @@ pub fn build(b: *std.Build) void {
                     .{p.name},
                 );
             }
+            continue;
+        }
+
+        if (p.needs_ohos_sdk and ohos_sdk_native == null) {
+            if (!std.mem.eql(u8, platform_filter, "all")) {
+                std.debug.print(
+                    "skipping {s}: OHOS_NATIVE_SDK not set and -Dohos-sdk-native=... not provided\n",
+                    .{p.name},
+                );
+            }
+            continue;
+        }
+
+        if (p.needs_ohos_sdk) {
+            buildOhos(b, p, ohos_sdk_native.?, optimize, &base_flags) catch |err| {
+                std.debug.print("ohos build setup failed: {s}\n", .{@errorName(err)});
+            };
             continue;
         }
 
@@ -153,7 +183,7 @@ pub fn build(b: *std.Build) void {
 
     if (!matched) {
         std.debug.print(
-            "unknown platform: '{s}'. Use one of: windows-x64, windows-x86, linux-x64, macos-x64, macos-arm64, android-arm64, all\n",
+            "unknown platform: '{s}'. Use one of: windows-x64, windows-x86, linux-x64, macos-x64, macos-arm64, android-arm64, ohos-arm64, all\n",
             .{platform_filter},
         );
     }
@@ -209,6 +239,49 @@ fn buildAndroid(
     cmd.addArg("-Wl,--no-undefined");
     cmd.addArg("-Wl,-z,noexecstack");
     cmd.addArg("-llog");
+    cmd.addArg("-I");
+    cmd.addDirectoryArg(b.path("third_party/jni"));
+    cmd.addArg("-I");
+    cmd.addDirectoryArg(b.path("third_party/sse2neon"));
+    cmd.addArg("-x");
+    cmd.addArg("c++");
+    cmd.addFileArg(b.path("dllmain.cpp"));
+    cmd.addArg("-o");
+    const out_lib = cmd.addOutputFileArg(out_name);
+
+    const install = b.addInstallFileWithDir(out_lib, .{ .custom = p.name }, out_name);
+    const platform_step = b.step(p.name, b.fmt("Build {s} library", .{p.name}));
+    platform_step.dependOn(&install.step);
+    b.getInstallStep().dependOn(&install.step);
+}
+
+fn buildOhos(
+    b: *std.Build,
+    p: PlatformSpec,
+    ohos_sdk_native: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    base_flags: []const []const u8,
+) !void {
+    const clang = b.fmt("{s}/llvm/bin/clang++", .{ohos_sdk_native});
+    const sysroot = b.fmt("--sysroot={s}/sysroot", .{ohos_sdk_native});
+    const out_name = "libysm-core.so";
+
+    const cmd = b.addSystemCommand(&.{clang});
+    cmd.addArg("--target=aarch64-linux-ohos");
+    cmd.addArg(sysroot);
+    cmd.addArg("-D__MUSL__");
+    cmd.addArgs(base_flags);
+    cmd.addArg("-shared");
+    cmd.addArg("-fPIC");
+    cmd.addArg(switch (optimize) {
+        .Debug => "-O0",
+        .ReleaseSafe => "-O2",
+        .ReleaseFast => "-O3",
+        .ReleaseSmall => "-Os",
+    });
+    if (optimize != .Debug) cmd.addArg("-s");
+    cmd.addArg("-Wl,--no-undefined");
+    cmd.addArg("-Wl,-z,noexecstack");
     cmd.addArg("-I");
     cmd.addDirectoryArg(b.path("third_party/jni"));
     cmd.addArg("-I");

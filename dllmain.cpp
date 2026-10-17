@@ -23,6 +23,7 @@
 #include <memory>
 #include "jni.h"
 #include <cstdint>
+#include <cstddef>
 
 #if defined(__GLIBC__) || defined(__BIONIC__)
 #define FAST_SINCOS(x, s, c) sincosf((x), (s), (c))
@@ -69,6 +70,9 @@ struct alignas(16) PrecomputedBoneMats {
     __m128 gn_c0, gn_c1, gn_c2;
     int currentLight;
 };
+
+static_assert(sizeof(PrecomputedBoneMats) == 128, "PrecomputedBoneMats size mismatch");
+static_assert(alignof(PrecomputedBoneMats) == 16, "PrecomputedBoneMats alignment mismatch");
 
 enum Uninitialized { UNINITIALIZED };
 
@@ -135,6 +139,9 @@ struct alignas(16) Mat4 {
     }
 };
 
+static_assert(sizeof(Mat4) == 64, "Mat4 size mismatch");
+static_assert(alignof(Mat4) == 16, "Mat4 alignment mismatch");
+
 struct NativeModel {
     std::vector<NativeBone> bones;
     std::vector<FastQuad> fastQuads;
@@ -167,6 +174,10 @@ struct BoneDataOut {
 };
 
 static_assert(sizeof(BoneDataOut) == 144, "BoneDataOut mismatch");
+static_assert(offsetof(BoneDataOut, transform) == 0, "BoneDataOut.transform offset mismatch");
+static_assert(offsetof(BoneDataOut, normal) == 64, "BoneDataOut.normal offset mismatch");
+static_assert(offsetof(BoneDataOut, packedLight) == 128, "BoneDataOut.packedLight offset mismatch");
+static_assert(offsetof(BoneDataOut, isHidden) == 132, "BoneDataOut.isHidden offset mismatch");
 
 struct NativeGpuMesh {
     std::vector<NativeBone> bones;
@@ -1060,6 +1071,8 @@ static const JNINativeMethod gMethods[] = {
             Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nComputeBoneMatricesLocal)
     },
 };
+
+static_assert(sizeof(gMethods) / sizeof(gMethods[0]) == 11, "Unexpected JNI method table size");
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <cpuid.h>
