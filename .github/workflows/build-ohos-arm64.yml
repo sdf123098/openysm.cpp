@@ -1,0 +1,85 @@
+name: OpenHarmony ARM64 native (experimental)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'dllmain.cpp'
+      - 'third_party/**'
+      - '.github/workflows/build-ohos-arm64.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'dllmain.cpp'
+      - 'third_party/**'
+      - '.github/workflows/build-ohos-arm64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ohos-arm64:
+    name: Compile JNI library for OpenHarmony ARM64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install OpenHarmony Native SDK
+        id: ohos
+        uses: openharmony-rs/setup-ohos-sdk@v1.0.1
+        with:
+          version: '6.0'
+          components: native
+          cache: 'true'
+
+      - name: Cross-compile using OpenHarmony Clang
+        shell: bash
+        env:
+          OHOS_NATIVE_SDK: ${{ steps.ohos.outputs.ohos_sdk_native }}
+        run: |
+          set -euo pipefail
+          test -d "$OHOS_NATIVE_SDK/sysroot"
+          CXX="$OHOS_NATIVE_SDK/llvm/bin/clang++"
+          test -x "$CXX"
+          "$CXX" --version
+          mkdir -p zig-out/ohos-arm64
+          "$CXX" \
+            --target=aarch64-linux-ohos \
+            --sysroot="$OHOS_NATIVE_SDK/sysroot" \
+            -D__MUSL__ \
+            -std=c++17 -O3 -shared -fPIC \
+            -fvisibility=hidden -fno-exceptions -fno-rtti \
+            -ffp-contract=fast -fno-math-errno -fno-trapping-math \
+            -Wl,--no-undefined -Wl,-z,noexecstack \
+            -Ithird_party/jni -Ithird_party/sse2neon \
+            dllmain.cpp \
+            -o zig-out/ohos-arm64/libysm-core.so
+
+      - name: Verify ELF architecture, JNI exports, and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=zig-out/ohos-arm64/libysm-core.so
+          test -s "$LIB"
+          file "$LIB"
+          readelf -h "$LIB" | tee zig-out/ohos-arm64/ELF_HEADER.txt
+          readelf -h "$LIB" | grep -q 'AArch64'
+          readelf -d "$LIB" | tee zig-out/ohos-arm64/ELF_DYNAMIC.txt
+          readelf -Ws "$LIB" | tee zig-out/ohos-arm64/ELF_SYMBOLS.txt > /dev/null
+          grep -q 'Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nGetAbiVersion' zig-out/ohos-arm64/ELF_SYMBOLS.txt
+          grep -q 'Java_com_elfmcys_yesstevemodel_geckolib3_geo_render_built_GeoModel_nInitModelCache' zig-out/ohos-arm64/ELF_SYMBOLS.txt
+          (
+            cd zig-out
+            sha256sum ohos-arm64/libysm-core.so > SHA256SUMS
+          )
+
+      - name: Upload experimental OHOS build and diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: ysm-core-ohos-arm64-${{ github.sha }}
+          path: |
+            zig-out/ohos-arm64/
+            zig-out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
